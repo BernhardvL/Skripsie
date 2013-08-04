@@ -1,0 +1,853 @@
+// ImageCaptureStereoVision.cpp : Defines the entry point for the console application.
+//
+
+
+#include "stdafx.h"
+#include <vector>
+#include <windows.h>
+#include <iostream> // for standard I/O
+#include <string>   // for strings
+#include <iomanip>  // for controlling float print precision
+#include <sstream>  // string to number conversion
+
+#include <stdlib.h>
+#include <opencv2/nonfree/nonfree.hpp>
+#include <opencv2/legacy/compat.hpp>
+
+#include "opencv2/imgproc/imgproc.hpp"  // Gaussian Blur
+#include "opencv2/core/core.hpp"        // Basic OpenCV structures (cv::Mat, Scalar)
+#include <opencv2/highgui/highgui.hpp>  // OpenCV window I/O
+#include <opencv2/features2d/features2d.hpp>
+#include <opencv2/core/mat.hpp>
+#include <opencv2/legacy/compat.hpp>
+#include <opencv2/calib3d/calib3d.hpp>
+#include <opencv2\imgproc\imgproc_c.h>
+#include "CLEyeMulticam.h"
+
+using namespace std;
+using namespace cv;
+
+int getCalIm = 0;  	//Capture calibration Images
+int calib = 1;			//Calculate calibration Parameters
+int recOn = 1;			//Do rectification
+int useKnownVal = 1;		//Use known values to do rectification
+int captureOn = 0;		//Capture Images for SLAM
+
+void findImagePoints(vector<KeyPoint> *kPntsIn, Mat Im, Mat *descrip);
+
+int gain = 0;					//Choose gain for both cameras
+int expo = 50;					//Choose exposure for both cameras
+double zoom = 0.0;			//Choose zoom of cameras
+int rot = 0;					//Choose rotation of cameras
+
+int key;						//Key pressed
+
+int w1,w2,h1,h2;				//Image size variables
+IplImage *capIm1,*capIm2;		//Images capturing variables
+//PBYTE capBuff1 = NULL;			//Image capture buffer 1
+//PBYTE capBuff2 = NULL;			//Image capture buffer 2
+
+//GUID guid1 = CLEyeGetCameraUUID(0);		//Camera 1 GUID
+//GUID guid2 = CLEyeGetCameraUUID(1);		//Camera 2 GUID
+
+//CLEyeCameraInstance camera1 = CLEyeCreateCamera(guid1,CLEYE_COLOR_PROCESSED,CLEYE_QVGA,30);
+//CLEyeCameraInstance camera2 = CLEyeCreateCamera(guid2,CLEYE_COLOR_PROCESSED,CLEYE_QVGA,30);
+
+/////////////////////////////////////
+//////Variables for Calibration//////
+/////////////////////////////////////
+
+std::vector<std::vector<cv::Point3f>> objectPoints1;	//Vector of vectors for object points
+std::vector<std::vector<cv::Point2f>> imagePoints1;		//Vector of vectors for image points
+
+std::vector<std::vector<cv::Point3f>> objectPoints2;	//Vector of vectors for object points
+std::vector<std::vector<cv::Point2f>> imagePoints2;		//Vector of vectors for image points
+
+int checkRows = 12;										//Checkerboard horizontal number of internal corners
+int checkCol = 12;										//Checkerboard vertical number of internal corners
+float sqrSide = 30;									//Set the length of th side of each square to 30mm
+
+int successes1 = 0;										//Number of succesful checkerboard find
+int successes2 = 0;										//Number of succesful checkerboard find
+
+double fail1,fail2,fail3;
+
+cv::Mat camMat1;										//Camera matrix
+cv::Mat distort1;										//Distortion Coeficients
+
+cv::Mat camMat2;										//Camera matrix
+cv::Mat distort2;										//Distortion Coeficients
+
+std::vector<cv::Mat> transMat1,rotMat1;					//Vectors for translation and rotation matrices
+std::vector<cv::Mat> transMat2,rotMat2;					//Vectors for translation and rotation matrices
+
+//cv::Mat transMat1,rotMat1;
+//cv::Mat transMat2,rotMat2;
+
+int x;
+int numImages = 14;
+
+std::vector<IplImage*> calIm1(numImages);
+std::vector<IplImage*> calIm2(numImages);
+
+std::vector<cv::Mat> checkIm1(numImages);
+std::vector<cv::Mat> checkIm2(numImages);
+
+cv::Size checkBoardSize(checkRows,checkCol);				//Size of checkerboard
+
+std::vector<cv::Point2f> corner2f1;
+std::vector<cv::Point3f> corner3f1;
+
+std::vector<cv::Point2f> corner2f2;
+std::vector<cv::Point3f> corner3f2;
+
+Mat R;
+Mat Rt;
+Mat T;
+Mat E;
+Mat F;
+
+double r[3][1] = {0.00189,-0.00040,0.00653};
+Mat Rk = Mat(3, 1, CV_64F, r);
+
+double t[3][1] = {-89.51204,-0.21901,-0.28905};
+Mat Tk = Mat(3, 1, CV_64F, t);
+
+/////////////////////////////////////
+/////////////////////////////////////
+/////////////////////////////////////
+
+Mat in;
+Mat out;
+vector<KeyPoint> inKeyPoints;
+Mat inDescrip;
+
+Mat inLeft,inRight,outLeft,outRight;
+vector<KeyPoint> inLeftKeyPoints,inRightKeyPoints;
+Mat inLeftDes,inRightDes;
+int imCnt = 0;
+
+/////////////////////////////////////
+/////////////////////////////////////
+/////////////////////////////////////
+
+cv::Mat R1,R2,P1,P2,Q,cam1Map1,cam1Map2,cam2Map1,cam2Map2;
+
+std::vector<cv::Mat> recIm1(numImages);
+std::vector<cv::Mat> recIm2(numImages);
+
+std::vector<cv::Mat> undistortedIm1(numImages);
+std::vector<cv::Mat> undistortedIm2(numImages);
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////CLEyecam Stereo Camera Sample Code//////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+double GetRandomNormalized()
+{
+	return (double)(rand()-(RAND_MAX>>1))/(double)(RAND_MAX>>1);
+}
+
+// Sample camera capture class
+class CLEyeCameraCapture
+{
+	CHAR _windowName[256];
+	GUID _cameraGUID;
+	CLEyeCameraInstance _cam;
+	CLEyeCameraColorMode _mode;
+	CLEyeCameraResolution _resolution;
+	float _fps;
+	HANDLE _hThread;
+	bool _running;
+	int _camnum;
+public:
+	CLEyeCameraCapture(LPSTR windowName, GUID cameraGUID, CLEyeCameraColorMode mode, CLEyeCameraResolution resolution, float fps, int camnum) :
+		_cameraGUID(cameraGUID), _cam(NULL), _mode(mode), _resolution(resolution), _fps(fps), _running(false), _camnum(camnum)
+	{
+		//strcpy(_windowName, windowName);
+	}
+	bool StartCapture()
+	{
+		_running = true;
+		cvNamedWindow(_windowName, CV_WINDOW_AUTOSIZE);
+		// Start CLEye image capture thread
+		_hThread = CreateThread(NULL, 0, &CLEyeCameraCapture::CaptureThread, this, 0, 0);
+		if(_hThread == NULL)
+		{
+			//MessageBox(NULL,"Could not create capture thread","CLEyeMulticamTest", MB_ICONEXCLAMATION);
+			return false;
+		}
+		return true;
+	}
+	void StopCapture()
+	{
+		if(!_running)	return;
+		_running = false;
+		WaitForSingleObject(_hThread, 1000);
+		cvDestroyWindow(_windowName);
+	}
+	void IncrementCameraParameter(int param)
+	{
+		if(!_cam)	return;
+		printf("CLEyeGetCameraParameter %d\n", CLEyeGetCameraParameter(_cam, (CLEyeCameraParameter)param));
+		CLEyeSetCameraParameter(_cam, (CLEyeCameraParameter)param, CLEyeGetCameraParameter(_cam, (CLEyeCameraParameter)param)+10);
+	}
+	void DecrementCameraParameter(int param)
+	{
+		if(!_cam)	return;
+		printf("CLEyeGetCameraParameter %d\n", CLEyeGetCameraParameter(_cam, (CLEyeCameraParameter)param));
+		CLEyeSetCameraParameter(_cam, (CLEyeCameraParameter)param, CLEyeGetCameraParameter(_cam, (CLEyeCameraParameter)param)-10);
+	}
+	void Run()
+	{
+		int w, h;
+		IplImage *pCapImage;
+		PBYTE pCapBuffer = NULL;
+		// Create camera instance
+		_cam = CLEyeCreateCamera(_cameraGUID, _mode, _resolution, _fps);
+		if(_cam == NULL)		return;
+		// Get camera frame dimensions
+		CLEyeCameraGetFrameDimensions(_cam, w, h);
+		// Depending on color mode chosen, create the appropriate OpenCV image
+		if(_mode == CLEYE_COLOR_PROCESSED || _mode == CLEYE_COLOR_RAW)
+			pCapImage = cvCreateImage(cvSize(w, h), IPL_DEPTH_8U, 4);
+		else
+			pCapImage = cvCreateImage(cvSize(w, h), IPL_DEPTH_8U, 1);
+
+		// Set some camera parameters
+		CLEyeSetCameraParameter(_cam, CLEYE_GAIN, 0);
+		CLEyeSetCameraParameter(_cam, CLEYE_EXPOSURE, 50);
+		CLEyeSetCameraParameter(_cam, CLEYE_ZOOM, 0);
+		CLEyeSetCameraParameter(_cam, CLEYE_ROTATION, 0);
+
+		// Start capturing
+		CLEyeCameraStart(_cam);
+		cvGetImageRawData(pCapImage, &pCapBuffer);
+		// image capturing loop
+		int count = 0;
+		int imcnt = 0;
+
+		while(_running)
+		{
+			CLEyeCameraGetFrame(_cam, pCapBuffer);
+
+			if(count == 150)
+			{
+				imcnt++;
+				if(imcnt < 40)
+				{
+					char filename[MAX_PATH] = {0};
+					sprintf_s( filename, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Cam%dFrame%d.jpg",_camnum,imcnt);
+					printf(filename);
+					cvSaveImage(filename,pCapImage);
+					count = 0;
+				}else
+				{
+					count = 0;
+					//break;
+				}
+			}
+
+			cvShowImage(_windowName, pCapImage);
+
+			count++;
+		}
+		// Stop camera capture
+		CLEyeCameraStop(_cam);
+		// Destroy camera object
+		CLEyeDestroyCamera(_cam);
+		// Destroy the allocated OpenCV image
+		cvReleaseImage(&pCapImage);
+		_cam = NULL;
+	}
+	static DWORD WINAPI CaptureThread(LPVOID instance)
+	{
+		// seed the rng with current tick count and thread id
+		srand(GetTickCount() + GetCurrentThreadId());
+		// forward thread to Capture function
+		CLEyeCameraCapture *pThis = (CLEyeCameraCapture *)instance;
+		pThis->Run();
+		return 0;
+	}
+};
+
+// Main program entry point
+/*int _tmain(int argc, _TCHAR* argv[])
+{
+	CLEyeCameraCapture *cam[2] = { NULL };
+	srand(GetTickCount());
+	// Query for number of connected cameras
+	int numCams = CLEyeGetCameraCount();
+	if(numCams == 0)
+	{
+		printf("No PS3Eye cameras detected\n");
+		return -1;
+	}
+	printf("Found %d cameras\n", numCams);
+	for(int i = 0; i < numCams; i++)
+	{
+		char windowName[64];
+		// Query unique camera uuid
+		GUID guid = CLEyeGetCameraUUID(i);
+		printf("Camera %d GUID: [%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x]\n", 
+						i+1, guid.Data1, guid.Data2, guid.Data3,
+						guid.Data4[0], guid.Data4[1], guid.Data4[2],
+						guid.Data4[3], guid.Data4[4], guid.Data4[5],
+						guid.Data4[6], guid.Data4[7]);
+		sprintf(windowName, "Camera Window %d", i+1);
+		// Create camera capture object
+		// Randomize resolution and color mode
+		cam[i] = new CLEyeCameraCapture(windowName, guid, CLEYE_COLOR_PROCESSED,CLEYE_VGA, 30,i);
+		printf("Starting capture on camera %d\n", i+1);
+		cam[i]->StartCapture();
+	}
+	printf("Use the following keys to change camera parameters:\n"
+		"\t'1' - select camera 1\n"
+		"\t'2' - select camera 2\n"
+		"\t'g' - select gain parameter\n"
+		"\t'e' - select exposure parameter\n"
+		"\t'z' - select zoom parameter\n"
+		"\t'r' - select rotation parameter\n"
+		"\t'+' - increment selected parameter\n"
+		"\t'-' - decrement selected parameter\n");
+	// The <ESC> key will exit the program
+	CLEyeCameraCapture *pCam = NULL;
+	int param = -1, key;
+	while((key = cvWaitKey(0)) != 0x1b)
+	{
+		switch(key)
+		{
+			case 'g':	case 'G':	printf("Parameter Gain\n");		param = CLEYE_GAIN;		break;
+			case 'e':	case 'E':	printf("Parameter Exposure\n");	param = CLEYE_EXPOSURE;	break;
+			case 'z':	case 'Z':	printf("Parameter Zoom\n");		param = CLEYE_ZOOM;		break;
+			case 'r':	case 'R':	printf("Parameter Rotation\n");	param = CLEYE_ROTATION;	break;
+			case '1':				printf("Selected camera 1\n");	pCam = cam[0];			break;
+			case '2':				printf("Selected camera 2\n");	pCam = cam[1];			break;
+			case '+':	if(pCam)	pCam->IncrementCameraParameter(param);		break;
+			case '-':	if(pCam)	pCam->DecrementCameraParameter(param);		break;
+		}
+	}
+
+	for(int i = 0; i < numCams; i++)
+	{
+		printf("Stopping capture on camera %d\n", i+1);
+		cam[i]->StopCapture();
+		delete cam[i];
+	}
+	return 0;
+}*/
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////End of Sample Code//////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+int _tmain(int argc, _TCHAR* argv[])
+{
+	
+	/////////////////////////////////////////////////////////////
+	/////////////////////////Calibration/////////////////////////
+	/////////////////////////////////////////////////////////////
+	if(calib == 1)
+	{
+		if(getCalIm == 1)
+		{
+			CLEyeCameraCapture *cam[2] = { NULL };
+			srand(GetTickCount());
+			// Query for number of connected cameras
+			int numCams = CLEyeGetCameraCount();
+			if(numCams == 0)
+			{
+				printf("No PS3Eye cameras detected\n");
+				return -1;
+			}
+			printf("Found %d cameras\n", numCams);
+			for(int i = 0; i < numCams; i++)
+			{
+				char windowName[64];
+				// Query unique camera uuid
+				GUID guid = CLEyeGetCameraUUID(i);
+				printf("Camera %d GUID: [%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x]\n", 
+								i+1, guid.Data1, guid.Data2, guid.Data3,
+								guid.Data4[0], guid.Data4[1], guid.Data4[2],
+								guid.Data4[3], guid.Data4[4], guid.Data4[5],
+								guid.Data4[6], guid.Data4[7]);
+				sprintf_s(windowName, "Camera Window %d", i+1);
+				// Create camera capture object
+				// Randomize resolution and color mode
+				cam[i] = new CLEyeCameraCapture(windowName, guid, CLEYE_COLOR_PROCESSED,CLEYE_VGA, 30,i);
+				printf("Starting capture on camera %d\n", i+1);
+				cam[i]->StartCapture();
+			}
+
+			CLEyeCameraCapture *pCam = NULL;
+
+			while(waitKey(0) != 0x1b)
+			{
+			}
+
+			for(int i = 0; i < numCams; i++)
+			{
+				printf("Stopping capture on camera %d\n", i+1);
+				cam[i]->StopCapture();
+				delete cam[i];
+			}
+		}
+
+		std::cout << "Starting calibration"<< endl;
+		std::cout << "Loading images"<< endl;
+		for(int y=0;y<numImages;y++)
+		{
+			////Left Image////
+
+			std::cout << "Setting path for left image: "<< y+1 << endl;
+
+			char filename1[MAX_PATH] = {0};
+			sprintf_s( filename1, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\Left%d.jpg",y+1);		//Set file name  and path3
+
+			std::cout << "Loading left image: "<< y+1 << endl;
+
+			checkIm1[y] = cv::imread(filename1,CV_LOAD_IMAGE_GRAYSCALE);
+
+			std::cout << "Loaded left image: "<< y+1 << endl;
+
+			////Right Image////
+
+			std::cout << "Setting path for right image: "<< y+1 << endl;
+
+			char filename2[MAX_PATH] = {0};
+			sprintf_s( filename2, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\Right%d.jpg",y+1);		//Set file name  and path
+
+			std::cout << "Loading right image: "<< y+1 << endl;
+
+			checkIm2[y] = cv::imread(filename2,CV_LOAD_IMAGE_GRAYSCALE);
+
+			std::cout << "Loaded right image: "<< y+1 << endl;
+		}
+
+		std::cout << "Finding chessboard corners"<< endl;
+		for(int z1 = 0;z1 < (checkRows);z1++)
+			{
+				for(int z2 = 0;z2 < (checkCol);z2++)
+				{
+					corner3f1.push_back(cv::Point3f((float)(z1)*sqrSide,(float)(z2)*sqrSide,0.0));
+
+					corner3f2.push_back(cv::Point3f((float)(z1)*sqrSide,(float)(z2)*sqrSide,0.0));
+				}
+			}
+		cout << "Object points size " << corner3f2.size() << endl;
+
+		for(int x = 0;x < numImages;x++)
+		{
+			//// ////
+
+			corner2f1.clear();
+			corner2f2.clear();
+		
+			////Left Image////
+
+			std::cout << "Processing left image "<< x+1 << endl;
+		
+			bool foundCorner = cv::findChessboardCorners(checkIm1[x],checkBoardSize,corner2f1); //,CALIB_CB_ADAPTIVE_THRESH + CALIB_CB_NORMALIZE_IMAGE + CALIB_CB_FAST_CHECK);					//Find checkerboard corners in image
+		
+			std::cout << "Finished finding corners in left image "<< x+1 << endl;
+
+			if(foundCorner)
+			{
+				successes1++;																			//Increment number of successes		
+
+				std::cout << "Performing subpixel correction on left image "<< x+1 << " for the " << corner2f1.size() << " corners"<< endl;
+
+				cv::cornerSubPix(checkIm1[x], corner2f1, cvSize(11, 11), cvSize(-1, -1),cv::TermCriteria(CV_TERMCRIT_EPS + CV_TERMCRIT_ITER, 300, 1e-5));
+				std::cout << "Drawing found corner on left image "<< x+1 << endl;
+
+				cv::drawChessboardCorners(checkIm1[x], checkBoardSize, cv::Mat(corner2f1), foundCorner);	//Draw checkerboard on image
+
+				imagePoints1.push_back(corner2f1);														//Add another point at end of imagePoints1 vector
+				objectPoints1.push_back(corner3f1);														//Add another point at end of objectPoints1 vector	
+			}
+
+			////Right Image////
+
+			std::cout << "Processing right image "<< x+1 << endl;
+		
+			foundCorner = cv::findChessboardCorners(checkIm2[x],checkBoardSize,corner2f2); //,CALIB_CB_ADAPTIVE_THRESH + CALIB_CB_NORMALIZE_IMAGE + CALIB_CB_FAST_CHECK);					//Find checkerboard corners in image
+		
+			std::cout << "Finished finding corners in right image "<< x+1 << endl;
+
+			if(foundCorner)
+			{
+				successes2++;																			//Increment number of successes
+
+				std::cout << "Performing subpixel correction on right image "<< x+1 <<  "for the " << corner2f1.size() << " corners"<< endl;
+
+				cv::cornerSubPix(checkIm2[x], corner2f2, cvSize(11, 11), cvSize(-1, -1),cv::TermCriteria(CV_TERMCRIT_EPS + CV_TERMCRIT_ITER, 300, 1e-5));
+				std::cout << "Drawing found corner on right image "<< x+1 << endl;
+
+				cv::drawChessboardCorners(checkIm2[x], checkBoardSize, cv::Mat(corner2f2), foundCorner);	//Draw checkerboard on image
+
+				imagePoints2.push_back(corner2f2);														//Add another point at end of imagePoints1 vector
+				objectPoints2.push_back(corner3f2);														//Add another point at end of objectPoints1 vector
+			}
+		}
+
+
+		////Display left iamge with chessboard corners////
+
+		std::cout << "Showing left image with chessboard corner"<< endl;
+		cvNamedWindow("Camera 1",CV_WINDOW_AUTOSIZE);
+		cv::imshow("Camera 1",checkIm1[0]);
+
+		////Display right image with chessboard corners////
+
+		std::cout << "Showing right image with chessboard corner"<< endl;
+		cvNamedWindow("Camera 2",CV_WINDOW_AUTOSIZE);
+		cv::imshow("Camera 2",checkIm2[0]);
+
+		////Calibrate left camera////
+
+		std::cout << "Calculate Camera 1 calibration parameters" << endl;
+		double calSuccess1 = calibrateCamera(objectPoints1,imagePoints1,checkIm1[0].Mat::size(),camMat1,distort1,transMat1,rotMat1);
+
+		fail1 = numImages - successes1;
+
+		std::cout << "Save Camera 1 calibration parameters" << endl;
+
+		FileStorage fsCam1("calParamCam1.yml", FileStorage::WRITE);
+		fsCam1.open("calParamCam1.yml", FileStorage::WRITE);
+		if (fsCam1.isOpened())
+		{
+			std::cout << "Opened file for saving: calParamCam1.yml" << endl;
+
+			fsCam1 << "Kalibration Matrix" << camMat1;
+			fsCam1 << "Distortion Parameters" << distort1;
+			fsCam1 << "RMS 1" << calSuccess1;
+			fsCam1 << "Failed Images 1" << fail1;
+			fsCam1.release();
+
+			std::cout << "Closed: calParamCam1.yml" << endl;
+		}
+
+		std::cout << "Finished Saving Camera 1 calibration parameters" << endl;
+
+		////Calibrate right camera////
+
+		std::cout << "Calculate Camera 2 calibration parameters" << endl;
+		double calSuccess2 = calibrateCamera(objectPoints2,imagePoints2,checkIm2[0].Mat::size(),camMat2,distort2,transMat2,rotMat2);
+
+		fail2 = numImages - successes2;
+
+		std::cout << "Save Camera 2 calibration parameters" << endl;
+	
+		FileStorage fsCam2("calParamCam2.yml", FileStorage::WRITE);
+		fsCam2.open("calParamCam2.yml", FileStorage::WRITE);
+		if (fsCam2.isOpened())
+		{
+			std::cout << "Opened file for saving: calParamCam2.yml" << endl;
+
+			fsCam2 << "Kalibration Matrix" << camMat2;
+			fsCam2 << "Distortion Parameters" << distort2;
+			fsCam2 << "RMS 2" << calSuccess2;
+			fsCam2 << "Failed Images 2" << fail2;
+			fsCam2.release();
+
+			std::cout << "Closed: calParamCam2.yml" << endl;
+		}
+
+		std::cout << "Finished Saving Camera 2 calibration parameters" << endl;
+
+		////Stereo Calibrate////
+
+		std::cout << "Calculate stereo calibration parameters" << endl;
+		double calSuccess3 = stereoCalibrate(objectPoints1,imagePoints1,imagePoints2,camMat1,distort1,camMat2,distort2,checkIm2[0].Mat::size(),Rt,T,E,F,TermCriteria(CV_CALIB_FIX_INTRINSIC,300, 1e-7));
+
+		Rodrigues(Rt,R);
+
+		std::cout << "Save Camera 2 calibration parameters" << endl;
+
+		//fail3 = numImages - successes3;
+	
+		FileStorage fsStereo("calParamStereo.yml", FileStorage::WRITE);
+		fsStereo.open("calParamStereo.yml", FileStorage::WRITE);
+		if (fsStereo.isOpened())
+		{
+			std::cout << "Opened file for saving: calParamStereo.yml" << endl;
+
+			fsStereo << "R" << R;
+			fsStereo << "T" << T;
+			fsStereo << "E" << E;
+			fsStereo << "F" << F;
+			fsStereo << "Camera Matrix 1" << camMat1;
+			fsStereo << "Camera Matrix 2" << camMat2;
+			fsStereo << "RMS 1" << calSuccess1;
+			fsStereo << "RMS 2" << calSuccess2;
+			fsStereo << "RMS Stereo" << calSuccess3;
+			fsStereo << "Failed Images 1" << fail1;
+			fsStereo << "Failed Images 2" << fail2;
+			//fsStereo << "Failed Images 3" << fail3;
+			fsStereo.release();
+
+			std::cout << "Closed: calParamStereo.yml" << endl;
+		}
+
+		std::cout << "Finished Saving Camera 2 calibration parameters" << endl;
+	
+		std::cout << "Calibration Finished" << endl;
+	}
+
+	if(recOn == 1)
+	{
+		///////////////////////////////
+		/////////Rectification/////////
+		///////////////////////////////
+
+		std::cout << "Rectification Start" << endl;
+
+		////Change R and T to known values
+
+		FileStorage fsReal("calParamReal.yml", FileStorage::WRITE);
+		fsReal.open("calParamReal.yml", FileStorage::WRITE);
+		if (fsReal.isOpened())
+		{
+			fsReal << "R" << Rk;
+			fsReal << "T" << Tk;
+			fsReal.release();
+		}
+
+		////
+
+		std::cout << "Rectification: Calculate Rectification Transform and Projection Matrices" << endl;
+
+		if(useKnownVal = 1)
+		{
+			cv::stereoRectify(camMat1,distort1,camMat2,distort2,checkIm2[0].Mat::size(),Rk,Tk,R1,R2,P1,P2,Q);
+		}else
+		{
+			cv::stereoRectify(camMat1,distort1,camMat2,distort2,checkIm2[0].Mat::size(),R,T,R1,R2,P1,P2,Q);
+		}
+
+		std::cout << "Rectification: Calculate Rectification Maps" << endl;
+
+		cv::initUndistortRectifyMap(camMat1, distort1, R1, P1, checkIm2[0].Mat::size(), CV_32FC1, cam1Map1, cam1Map2);
+		cv::initUndistortRectifyMap(camMat2, distort2, R2, P2, checkIm2[0].Mat::size(), CV_32FC1, cam2Map1, cam2Map2);
+
+		std::cout << "Rectification: Remap Images" << endl;
+
+		cv::remap(checkIm1[0],recIm1[0],cam1Map1,cam1Map2,cv::INTER_AREA);
+		cv::remap(checkIm2[0],recIm2[0],cam2Map1,cam2Map2,cv::INTER_AREA);
+
+		std::cout << "Showing Rectified Images"<< endl;
+
+		cvNamedWindow("Rectified 1",CV_WINDOW_AUTOSIZE);
+		cv::imshow("Rectified 1",recIm1[0]);
+
+		cvNamedWindow("Rectified 2",CV_WINDOW_AUTOSIZE);
+		cv::imshow("Rectified 2",recIm2[0]);
+
+		std::cout << "Rectification Finished" << endl;
+	
+	}
+
+	//////////////////////////////////////////////////////////////
+	//////////Feaure Detection, Description and Matching//////////
+	//////////////////////////////////////////////////////////////
+
+	////////////////////////////////
+	////////Feature Detector////////
+	////////////////////////////////
+
+	////Left////
+
+	cv::initModule_nonfree();
+	
+	while(true)
+	{
+		cout << "Loading image for feature detection" << endl;
+
+		char filenameCapLeft[MAX_PATH] = {0};
+		sprintf_s( filenameCapLeft, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\Capture\\leftIm%d.jpg",imCnt+1);		//Set file name  and path3
+
+		char filenameCapRight[MAX_PATH] = {0};
+		sprintf_s( filenameCapRight, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\Capture\\rightIm%d.jpg",imCnt+1);		//Set file name  and path3
+
+		inLeft = cv::imread(filenameCapLeft,CV_LOAD_IMAGE_GRAYSCALE);
+		inRight = cv::imread(filenameCapRight,CV_LOAD_IMAGE_GRAYSCALE);
+
+		cout << "Find key points" << endl;
+
+		Ptr<FeatureDetector> siftFDLeft = FeatureDetector::create("SIFT");
+		siftFDLeft->detect(inLeft,inLeftKeyPoints);
+		Ptr<DescriptorExtractor> siftDELeft = DescriptorExtractor::create("SIFT");
+		siftDELeft->compute(inLeft,inLeftKeyPoints,inLeftDes);
+
+		Ptr<FeatureDetector> siftFDRight = FeatureDetector::create("SIFT");
+		siftFDRight->detect(inRight,inRightKeyPoints);
+		Ptr<DescriptorExtractor> siftDERight = DescriptorExtractor::create("SIFT");
+		siftDERight->compute(inRight,inRightKeyPoints,inRightDes);
+
+		cout << "Draw key points" << endl;
+
+		drawKeypoints(inLeft,inLeftKeyPoints,outLeft,Scalar(0, 0, 255),0);
+		namedWindow("Key Points Left");
+		imshow("Key Points Left", outLeft);
+
+		drawKeypoints(inRight,inRightKeyPoints,outRight,Scalar(0, 0, 255),0);
+		namedWindow("Key Points Right");
+		imshow("Key Points Right", outRight);
+
+		////Borrowed Code
+
+		FlannBasedMatcher matcher;
+
+		std::vector<vector<DMatch >> matches;
+		matcher.knnMatch(inLeftDes, inRightDes, matches, 2);
+
+		/*FileStorage fsMatches("matches.yml", FileStorage::WRITE);
+		fsMatches.open("matches.yml", FileStorage::WRITE);
+		if (fsMatches.isOpened())
+		{
+			fsMatches << "Matches" << matches;
+			fsMatches.release();
+		}*/
+
+		std::cout << "Matches: "<< matches.size() << endl;
+
+		////
+
+		imCnt++;
+
+		if(imCnt == 1)
+		{
+			break;
+		}
+	}
+
+	cout << "Finished feature detection" << endl;
+	/*cout << "Loading image for feature detection" << endl;
+
+	in = cv::imread("C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\2006 Stereo Datasets_files\\view1(5).jpg",CV_LOAD_IMAGE_GRAYSCALE);
+
+	cout << "Find key points" << endl;
+
+	cv::initModule_nonfree();
+
+	cout << "Find key points: feature detector" << endl;
+
+	Ptr<FeatureDetector> siftFD = FeatureDetector::create("SIFT");
+
+	cout << "Find key points: detect" << endl;
+
+	siftFD->detect(in,inKeyPoints);
+
+	cout << "Find key points: descriptor extractor" << endl;
+
+	Ptr<DescriptorExtractor> siftDE = DescriptorExtractor::create("SIFT");
+
+	cout << "Find key points: compute descriptor" << endl;
+
+	siftDE->compute(in,inKeyPoints,inDescrip);
+
+	cout << "Find key points: end" << endl;
+
+	cout << "Draw key points" << endl;
+
+	drawKeypoints(in,inKeyPoints,out,Scalar(0, 0, 255),0);
+
+	cout << "Show key points" << endl;
+
+	namedWindow("Key Points");
+	imshow("Key Points", out);
+
+	cout << "Finished feature detection" << endl;*/
+
+	///////////////////////////////
+
+	while((key = cvWaitKey(0)) != 0x1b);
+
+	return 0;
+}
+
+/*
+/////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////
+/////////////////////////////////////////////////////////////
+
+int main()
+{
+
+	std::cout << "Main"<< endl;
+	std::cout << "Loading images"<< endl;
+
+	for(int y=0;y<numImages;y++)
+	{
+		////Left Image////
+
+		std::cout << "Setting path for left image: "<< y+1 << endl;
+
+		char filename1[MAX_PATH] = {0};
+		sprintf_s( filename1, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\Left%d.jpg",y+1);		//Set file name  and path3
+
+		std::cout << "Loading left image: "<< y+1 << endl;
+
+		tempIm1 = cv::imread(filename1,CV_LOAD_IMAGE_GRAYSCALE);
+
+		std::cout << "Loaded left image: "<< y+1 << endl;
+
+		////Right Image////
+
+		std::cout << "Setting path for right image: "<< y+1 << endl;
+
+		char filename2[MAX_PATH] = {0};
+		sprintf_s( filename2, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\Right%d.jpg",y+1);		//Set file name  and path
+
+		std::cout << "Loading right image: "<< y+1 << endl;
+
+		tempIm2 = cv::imread(filename2,CV_LOAD_IMAGE_GRAYSCALE);
+
+		std::cout << "Loaded right image: "<< y+1 << endl;
+
+		std::cout << "Finished Loading"<< endl;
+
+		std::cout << "Feature Detection and Description"<< endl;
+		
+		cv::initModule_nonfree();
+
+		cout << "Find key points: feature detector" << endl;
+
+		Ptr<FeatureDetector> siftFD = FeatureDetector::create("SIFT");
+
+		cout << "Find key points: descriptor extractor" << endl;
+
+		Ptr<DescriptorExtractor> siftDE = DescriptorExtractor::create("SIFT");
+
+		std::cout << "/tLEFT"<< endl;
+
+			cout << "/tFind key points: detect" << endl;
+
+			siftFD->detect(tempIm1,KeyPointsIm1);
+
+			cout << "/tFind key points: compute descriptor" << endl;
+
+			siftDE->compute(tempIm1,KeyPointsIm1,DescripIm1);
+
+			cout << "/tFind key points: end" << endl;
+
+		std::cout << "/tRIGHT"<< endl;
+
+			cout << "/tFind key points: detect" << endl;
+
+			siftFD->detect(tempIm2,KeyPointsIm2);
+
+			cout << "/tFind key points: compute descriptor" << endl;
+
+			siftDE->compute(tempIm2,KeyPointsIm2,DescripIm2);
+
+			cout << "/tFind key points: end" << endl;
+
+		cout << "Find key points: end" << endl;
+	}
+
+}
+*/
