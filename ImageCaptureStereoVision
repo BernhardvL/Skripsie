@@ -9,6 +9,7 @@
 #include <string>   // for strings
 #include <iomanip>  // for controlling float print precision
 #include <sstream>  // string to number conversion
+#include <math.h>
 
 #include <stdlib.h>
 #include <opencv2/nonfree/nonfree.hpp>
@@ -24,12 +25,16 @@
 #include <opencv2\imgproc\imgproc_c.h>
 #include "CLEyeMulticam.h"
 
+#include <stdio.h>
+
 using namespace std;
 using namespace cv;
 
-int getCalIm = 0;  	//Capture calibration Images
-int calib = 1;			//Calculate calibration Parameters
-int recOn = 1;			//Do rectification
+vector<double> pose;
+
+int getCalIm = 0;		//Capture calibration Images
+int calib = 0;			//Calculate calibration Parameters
+int recOn = 0;			//Do rectification
 int useKnownVal = 1;		//Use known values to do rectification
 int captureOn = 0;		//Capture Images for SLAM
 
@@ -53,53 +58,28 @@ IplImage *capIm1,*capIm2;		//Images capturing variables
 //CLEyeCameraInstance camera1 = CLEyeCreateCamera(guid1,CLEYE_COLOR_PROCESSED,CLEYE_QVGA,30);
 //CLEyeCameraInstance camera2 = CLEyeCreateCamera(guid2,CLEYE_COLOR_PROCESSED,CLEYE_QVGA,30);
 
-/////////////////////////////////////
-//////Variables for Calibration//////
-/////////////////////////////////////
+//////////////////////////////////////
+////////Calibration Parameters////////
+//////////////////////////////////////
 
-std::vector<std::vector<cv::Point3f>> objectPoints1;	//Vector of vectors for object points
-std::vector<std::vector<cv::Point2f>> imagePoints1;		//Vector of vectors for image points
+double cM1[3][3] = {557.12943, 0, 360.78845, 0, 551.60828, 238.60101, 0, 0, 1};
+cv::Mat camMat1 = Mat(3,3,CV_64F,cM1);										//Camera matrix
 
-std::vector<std::vector<cv::Point3f>> objectPoints2;	//Vector of vectors for object points
-std::vector<std::vector<cv::Point2f>> imagePoints2;		//Vector of vectors for image points
+double d1[5][1] = {-0.12077, 0.19052, 0.00817, 0.00948, 0.00000};
+cv::Mat distort1 = Mat(5,1,CV_64F, d1);										//Distortion Coeficients
 
-int checkRows = 12;										//Checkerboard horizontal number of internal corners
-int checkCol = 12;										//Checkerboard vertical number of internal corners
-float sqrSide = 30;									//Set the length of th side of each square to 30mm
+double cM2[3][3] = {547.69705, 0, 345.60793, 0, 541.74991, 243.44769, 0, 0, 1};
+cv::Mat camMat2= Mat(3,3,CV_64F,cM2);;										//Camera matrix
 
-int successes1 = 0;										//Number of succesful checkerboard find
-int successes2 = 0;										//Number of succesful checkerboard find
+double d2[5][1] = {-0.14017, 0.11013, 0.00219, 0.00187, 0.00000};
+cv::Mat distort2 = Mat(5,1,CV_64F, d2);	;										//Distortion Coeficients
 
-double fail1,fail2,fail3;
+cv::Mat H;
 
-cv::Mat camMat1;										//Camera matrix
-cv::Mat distort1;										//Distortion Coeficients
-
-cv::Mat camMat2;										//Camera matrix
-cv::Mat distort2;										//Distortion Coeficients
-
-std::vector<cv::Mat> transMat1,rotMat1;					//Vectors for translation and rotation matrices
-std::vector<cv::Mat> transMat2,rotMat2;					//Vectors for translation and rotation matrices
-
-//cv::Mat transMat1,rotMat1;
-//cv::Mat transMat2,rotMat2;
-
-int x;
 int numImages = 14;
-
-std::vector<IplImage*> calIm1(numImages);
-std::vector<IplImage*> calIm2(numImages);
 
 std::vector<cv::Mat> checkIm1(numImages);
 std::vector<cv::Mat> checkIm2(numImages);
-
-cv::Size checkBoardSize(checkRows,checkCol);				//Size of checkerboard
-
-std::vector<cv::Point2f> corner2f1;
-std::vector<cv::Point3f> corner3f1;
-
-std::vector<cv::Point2f> corner2f2;
-std::vector<cv::Point3f> corner3f2;
 
 Mat R;
 Mat Rt;
@@ -107,10 +87,10 @@ Mat T;
 Mat E;
 Mat F;
 
-double r[3][1] = {0.00189,-0.00040,0.00653};
+double r[3][1] = {-0.00881, 0.02062, 0.00727};
 Mat Rk = Mat(3, 1, CV_64F, r);
 
-double t[3][1] = {-89.51204,-0.21901,-0.28905};
+double t[3][1] = {-374.65075, -1.77937, -27.96350};
 Mat Tk = Mat(3, 1, CV_64F, t);
 
 /////////////////////////////////////
@@ -122,9 +102,9 @@ Mat out;
 vector<KeyPoint> inKeyPoints;
 Mat inDescrip;
 
-Mat inLeft,inRight,outLeft,outRight;
-vector<KeyPoint> inLeftKeyPoints,inRightKeyPoints;
-Mat inLeftDes,inRightDes;
+Mat inLeft,inRight,outLeft,outRight,rectLeft, rectRight;
+vector<KeyPoint> inLeftKeyPoints,inRightKeyPoints,keyLeft,keyRights;
+Mat inLeftDes,inRightDes,desLeft,desRight;
 int imCnt = 0;
 
 /////////////////////////////////////
@@ -138,6 +118,11 @@ std::vector<cv::Mat> recIm2(numImages);
 
 std::vector<cv::Mat> undistortedIm1(numImages);
 std::vector<cv::Mat> undistortedIm2(numImages);
+
+
+////////////////////////////////////
+
+std::vector<DMatch > matches, goodMatches;
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////CLEyecam Stereo Camera Sample Code//////////////////////////////
@@ -271,71 +256,7 @@ public:
 	}
 };
 
-// Main program entry point
-/*int _tmain(int argc, _TCHAR* argv[])
-{
-	CLEyeCameraCapture *cam[2] = { NULL };
-	srand(GetTickCount());
-	// Query for number of connected cameras
-	int numCams = CLEyeGetCameraCount();
-	if(numCams == 0)
-	{
-		printf("No PS3Eye cameras detected\n");
-		return -1;
-	}
-	printf("Found %d cameras\n", numCams);
-	for(int i = 0; i < numCams; i++)
-	{
-		char windowName[64];
-		// Query unique camera uuid
-		GUID guid = CLEyeGetCameraUUID(i);
-		printf("Camera %d GUID: [%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x]\n", 
-						i+1, guid.Data1, guid.Data2, guid.Data3,
-						guid.Data4[0], guid.Data4[1], guid.Data4[2],
-						guid.Data4[3], guid.Data4[4], guid.Data4[5],
-						guid.Data4[6], guid.Data4[7]);
-		sprintf(windowName, "Camera Window %d", i+1);
-		// Create camera capture object
-		// Randomize resolution and color mode
-		cam[i] = new CLEyeCameraCapture(windowName, guid, CLEYE_COLOR_PROCESSED,CLEYE_VGA, 30,i);
-		printf("Starting capture on camera %d\n", i+1);
-		cam[i]->StartCapture();
-	}
-	printf("Use the following keys to change camera parameters:\n"
-		"\t'1' - select camera 1\n"
-		"\t'2' - select camera 2\n"
-		"\t'g' - select gain parameter\n"
-		"\t'e' - select exposure parameter\n"
-		"\t'z' - select zoom parameter\n"
-		"\t'r' - select rotation parameter\n"
-		"\t'+' - increment selected parameter\n"
-		"\t'-' - decrement selected parameter\n");
-	// The <ESC> key will exit the program
-	CLEyeCameraCapture *pCam = NULL;
-	int param = -1, key;
-	while((key = cvWaitKey(0)) != 0x1b)
-	{
-		switch(key)
-		{
-			case 'g':	case 'G':	printf("Parameter Gain\n");		param = CLEYE_GAIN;		break;
-			case 'e':	case 'E':	printf("Parameter Exposure\n");	param = CLEYE_EXPOSURE;	break;
-			case 'z':	case 'Z':	printf("Parameter Zoom\n");		param = CLEYE_ZOOM;		break;
-			case 'r':	case 'R':	printf("Parameter Rotation\n");	param = CLEYE_ROTATION;	break;
-			case '1':				printf("Selected camera 1\n");	pCam = cam[0];			break;
-			case '2':				printf("Selected camera 2\n");	pCam = cam[1];			break;
-			case '+':	if(pCam)	pCam->IncrementCameraParameter(param);		break;
-			case '-':	if(pCam)	pCam->DecrementCameraParameter(param);		break;
-		}
-	}
 
-	for(int i = 0; i < numCams; i++)
-	{
-		printf("Stopping capture on camera %d\n", i+1);
-		cam[i]->StopCapture();
-		delete cam[i];
-	}
-	return 0;
-}*/
 
 //////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////End of Sample Code//////////////////////////////////////
@@ -346,310 +267,6 @@ public:
 
 int _tmain(int argc, _TCHAR* argv[])
 {
-	
-	/////////////////////////////////////////////////////////////
-	/////////////////////////Calibration/////////////////////////
-	/////////////////////////////////////////////////////////////
-	if(calib == 1)
-	{
-		if(getCalIm == 1)
-		{
-			CLEyeCameraCapture *cam[2] = { NULL };
-			srand(GetTickCount());
-			// Query for number of connected cameras
-			int numCams = CLEyeGetCameraCount();
-			if(numCams == 0)
-			{
-				printf("No PS3Eye cameras detected\n");
-				return -1;
-			}
-			printf("Found %d cameras\n", numCams);
-			for(int i = 0; i < numCams; i++)
-			{
-				char windowName[64];
-				// Query unique camera uuid
-				GUID guid = CLEyeGetCameraUUID(i);
-				printf("Camera %d GUID: [%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x]\n", 
-								i+1, guid.Data1, guid.Data2, guid.Data3,
-								guid.Data4[0], guid.Data4[1], guid.Data4[2],
-								guid.Data4[3], guid.Data4[4], guid.Data4[5],
-								guid.Data4[6], guid.Data4[7]);
-				sprintf_s(windowName, "Camera Window %d", i+1);
-				// Create camera capture object
-				// Randomize resolution and color mode
-				cam[i] = new CLEyeCameraCapture(windowName, guid, CLEYE_COLOR_PROCESSED,CLEYE_VGA, 30,i);
-				printf("Starting capture on camera %d\n", i+1);
-				cam[i]->StartCapture();
-			}
-
-			CLEyeCameraCapture *pCam = NULL;
-
-			while(waitKey(0) != 0x1b)
-			{
-			}
-
-			for(int i = 0; i < numCams; i++)
-			{
-				printf("Stopping capture on camera %d\n", i+1);
-				cam[i]->StopCapture();
-				delete cam[i];
-			}
-		}
-
-		std::cout << "Starting calibration"<< endl;
-		std::cout << "Loading images"<< endl;
-		for(int y=0;y<numImages;y++)
-		{
-			////Left Image////
-
-			std::cout << "Setting path for left image: "<< y+1 << endl;
-
-			char filename1[MAX_PATH] = {0};
-			sprintf_s( filename1, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\Left%d.jpg",y+1);		//Set file name  and path3
-
-			std::cout << "Loading left image: "<< y+1 << endl;
-
-			checkIm1[y] = cv::imread(filename1,CV_LOAD_IMAGE_GRAYSCALE);
-
-			std::cout << "Loaded left image: "<< y+1 << endl;
-
-			////Right Image////
-
-			std::cout << "Setting path for right image: "<< y+1 << endl;
-
-			char filename2[MAX_PATH] = {0};
-			sprintf_s( filename2, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\Right%d.jpg",y+1);		//Set file name  and path
-
-			std::cout << "Loading right image: "<< y+1 << endl;
-
-			checkIm2[y] = cv::imread(filename2,CV_LOAD_IMAGE_GRAYSCALE);
-
-			std::cout << "Loaded right image: "<< y+1 << endl;
-		}
-
-		std::cout << "Finding chessboard corners"<< endl;
-		for(int z1 = 0;z1 < (checkRows);z1++)
-			{
-				for(int z2 = 0;z2 < (checkCol);z2++)
-				{
-					corner3f1.push_back(cv::Point3f((float)(z1)*sqrSide,(float)(z2)*sqrSide,0.0));
-
-					corner3f2.push_back(cv::Point3f((float)(z1)*sqrSide,(float)(z2)*sqrSide,0.0));
-				}
-			}
-		cout << "Object points size " << corner3f2.size() << endl;
-
-		for(int x = 0;x < numImages;x++)
-		{
-			//// ////
-
-			corner2f1.clear();
-			corner2f2.clear();
-		
-			////Left Image////
-
-			std::cout << "Processing left image "<< x+1 << endl;
-		
-			bool foundCorner = cv::findChessboardCorners(checkIm1[x],checkBoardSize,corner2f1); //,CALIB_CB_ADAPTIVE_THRESH + CALIB_CB_NORMALIZE_IMAGE + CALIB_CB_FAST_CHECK);					//Find checkerboard corners in image
-		
-			std::cout << "Finished finding corners in left image "<< x+1 << endl;
-
-			if(foundCorner)
-			{
-				successes1++;																			//Increment number of successes		
-
-				std::cout << "Performing subpixel correction on left image "<< x+1 << " for the " << corner2f1.size() << " corners"<< endl;
-
-				cv::cornerSubPix(checkIm1[x], corner2f1, cvSize(11, 11), cvSize(-1, -1),cv::TermCriteria(CV_TERMCRIT_EPS + CV_TERMCRIT_ITER, 300, 1e-5));
-				std::cout << "Drawing found corner on left image "<< x+1 << endl;
-
-				cv::drawChessboardCorners(checkIm1[x], checkBoardSize, cv::Mat(corner2f1), foundCorner);	//Draw checkerboard on image
-
-				imagePoints1.push_back(corner2f1);														//Add another point at end of imagePoints1 vector
-				objectPoints1.push_back(corner3f1);														//Add another point at end of objectPoints1 vector	
-			}
-
-			////Right Image////
-
-			std::cout << "Processing right image "<< x+1 << endl;
-		
-			foundCorner = cv::findChessboardCorners(checkIm2[x],checkBoardSize,corner2f2); //,CALIB_CB_ADAPTIVE_THRESH + CALIB_CB_NORMALIZE_IMAGE + CALIB_CB_FAST_CHECK);					//Find checkerboard corners in image
-		
-			std::cout << "Finished finding corners in right image "<< x+1 << endl;
-
-			if(foundCorner)
-			{
-				successes2++;																			//Increment number of successes
-
-				std::cout << "Performing subpixel correction on right image "<< x+1 <<  "for the " << corner2f1.size() << " corners"<< endl;
-
-				cv::cornerSubPix(checkIm2[x], corner2f2, cvSize(11, 11), cvSize(-1, -1),cv::TermCriteria(CV_TERMCRIT_EPS + CV_TERMCRIT_ITER, 300, 1e-5));
-				std::cout << "Drawing found corner on right image "<< x+1 << endl;
-
-				cv::drawChessboardCorners(checkIm2[x], checkBoardSize, cv::Mat(corner2f2), foundCorner);	//Draw checkerboard on image
-
-				imagePoints2.push_back(corner2f2);														//Add another point at end of imagePoints1 vector
-				objectPoints2.push_back(corner3f2);														//Add another point at end of objectPoints1 vector
-			}
-		}
-
-
-		////Display left iamge with chessboard corners////
-
-		std::cout << "Showing left image with chessboard corner"<< endl;
-		cvNamedWindow("Camera 1",CV_WINDOW_AUTOSIZE);
-		cv::imshow("Camera 1",checkIm1[0]);
-
-		////Display right image with chessboard corners////
-
-		std::cout << "Showing right image with chessboard corner"<< endl;
-		cvNamedWindow("Camera 2",CV_WINDOW_AUTOSIZE);
-		cv::imshow("Camera 2",checkIm2[0]);
-
-		////Calibrate left camera////
-
-		std::cout << "Calculate Camera 1 calibration parameters" << endl;
-		double calSuccess1 = calibrateCamera(objectPoints1,imagePoints1,checkIm1[0].Mat::size(),camMat1,distort1,transMat1,rotMat1);
-
-		fail1 = numImages - successes1;
-
-		std::cout << "Save Camera 1 calibration parameters" << endl;
-
-		FileStorage fsCam1("calParamCam1.yml", FileStorage::WRITE);
-		fsCam1.open("calParamCam1.yml", FileStorage::WRITE);
-		if (fsCam1.isOpened())
-		{
-			std::cout << "Opened file for saving: calParamCam1.yml" << endl;
-
-			fsCam1 << "Kalibration Matrix" << camMat1;
-			fsCam1 << "Distortion Parameters" << distort1;
-			fsCam1 << "RMS 1" << calSuccess1;
-			fsCam1 << "Failed Images 1" << fail1;
-			fsCam1.release();
-
-			std::cout << "Closed: calParamCam1.yml" << endl;
-		}
-
-		std::cout << "Finished Saving Camera 1 calibration parameters" << endl;
-
-		////Calibrate right camera////
-
-		std::cout << "Calculate Camera 2 calibration parameters" << endl;
-		double calSuccess2 = calibrateCamera(objectPoints2,imagePoints2,checkIm2[0].Mat::size(),camMat2,distort2,transMat2,rotMat2);
-
-		fail2 = numImages - successes2;
-
-		std::cout << "Save Camera 2 calibration parameters" << endl;
-	
-		FileStorage fsCam2("calParamCam2.yml", FileStorage::WRITE);
-		fsCam2.open("calParamCam2.yml", FileStorage::WRITE);
-		if (fsCam2.isOpened())
-		{
-			std::cout << "Opened file for saving: calParamCam2.yml" << endl;
-
-			fsCam2 << "Kalibration Matrix" << camMat2;
-			fsCam2 << "Distortion Parameters" << distort2;
-			fsCam2 << "RMS 2" << calSuccess2;
-			fsCam2 << "Failed Images 2" << fail2;
-			fsCam2.release();
-
-			std::cout << "Closed: calParamCam2.yml" << endl;
-		}
-
-		std::cout << "Finished Saving Camera 2 calibration parameters" << endl;
-
-		////Stereo Calibrate////
-
-		std::cout << "Calculate stereo calibration parameters" << endl;
-		double calSuccess3 = stereoCalibrate(objectPoints1,imagePoints1,imagePoints2,camMat1,distort1,camMat2,distort2,checkIm2[0].Mat::size(),Rt,T,E,F,TermCriteria(CV_CALIB_FIX_INTRINSIC,300, 1e-7));
-
-		Rodrigues(Rt,R);
-
-		std::cout << "Save Camera 2 calibration parameters" << endl;
-
-		//fail3 = numImages - successes3;
-	
-		FileStorage fsStereo("calParamStereo.yml", FileStorage::WRITE);
-		fsStereo.open("calParamStereo.yml", FileStorage::WRITE);
-		if (fsStereo.isOpened())
-		{
-			std::cout << "Opened file for saving: calParamStereo.yml" << endl;
-
-			fsStereo << "R" << R;
-			fsStereo << "T" << T;
-			fsStereo << "E" << E;
-			fsStereo << "F" << F;
-			fsStereo << "Camera Matrix 1" << camMat1;
-			fsStereo << "Camera Matrix 2" << camMat2;
-			fsStereo << "RMS 1" << calSuccess1;
-			fsStereo << "RMS 2" << calSuccess2;
-			fsStereo << "RMS Stereo" << calSuccess3;
-			fsStereo << "Failed Images 1" << fail1;
-			fsStereo << "Failed Images 2" << fail2;
-			//fsStereo << "Failed Images 3" << fail3;
-			fsStereo.release();
-
-			std::cout << "Closed: calParamStereo.yml" << endl;
-		}
-
-		std::cout << "Finished Saving Camera 2 calibration parameters" << endl;
-	
-		std::cout << "Calibration Finished" << endl;
-	}
-
-	if(recOn == 1)
-	{
-		///////////////////////////////
-		/////////Rectification/////////
-		///////////////////////////////
-
-		std::cout << "Rectification Start" << endl;
-
-		////Change R and T to known values
-
-		FileStorage fsReal("calParamReal.yml", FileStorage::WRITE);
-		fsReal.open("calParamReal.yml", FileStorage::WRITE);
-		if (fsReal.isOpened())
-		{
-			fsReal << "R" << Rk;
-			fsReal << "T" << Tk;
-			fsReal.release();
-		}
-
-		////
-
-		std::cout << "Rectification: Calculate Rectification Transform and Projection Matrices" << endl;
-
-		if(useKnownVal = 1)
-		{
-			cv::stereoRectify(camMat1,distort1,camMat2,distort2,checkIm2[0].Mat::size(),Rk,Tk,R1,R2,P1,P2,Q);
-		}else
-		{
-			cv::stereoRectify(camMat1,distort1,camMat2,distort2,checkIm2[0].Mat::size(),R,T,R1,R2,P1,P2,Q);
-		}
-
-		std::cout << "Rectification: Calculate Rectification Maps" << endl;
-
-		cv::initUndistortRectifyMap(camMat1, distort1, R1, P1, checkIm2[0].Mat::size(), CV_32FC1, cam1Map1, cam1Map2);
-		cv::initUndistortRectifyMap(camMat2, distort2, R2, P2, checkIm2[0].Mat::size(), CV_32FC1, cam2Map1, cam2Map2);
-
-		std::cout << "Rectification: Remap Images" << endl;
-
-		cv::remap(checkIm1[0],recIm1[0],cam1Map1,cam1Map2,cv::INTER_AREA);
-		cv::remap(checkIm2[0],recIm2[0],cam2Map1,cam2Map2,cv::INTER_AREA);
-
-		std::cout << "Showing Rectified Images"<< endl;
-
-		cvNamedWindow("Rectified 1",CV_WINDOW_AUTOSIZE);
-		cv::imshow("Rectified 1",recIm1[0]);
-
-		cvNamedWindow("Rectified 2",CV_WINDOW_AUTOSIZE);
-		cv::imshow("Rectified 2",recIm2[0]);
-
-		std::cout << "Rectification Finished" << endl;
-	
-	}
-
 	//////////////////////////////////////////////////////////////
 	//////////Feaure Detection, Description and Matching//////////
 	//////////////////////////////////////////////////////////////
@@ -658,64 +275,280 @@ int _tmain(int argc, _TCHAR* argv[])
 	////////Feature Detector////////
 	////////////////////////////////
 
-	////Left////
+	//////////Firts Image///////////
+
 
 	cv::initModule_nonfree();
 	
 	while(true)
 	{
+		Mat imUndistLeft, imUndistRight;
+		
+		int matchCnt = 0;
+		Mat pointCoord, tempCoord, Coordpre, Coordhom, Coord;
+		vector<Point2f> points1,points2;
+		Mat outIm1,outIm2;
+
+		goodMatches.clear();
+		points1.clear();
+		points2.clear();
+
 		cout << "Loading image for feature detection" << endl;
 
+		cout << "Creating Filenames" << endl;
+
 		char filenameCapLeft[MAX_PATH] = {0};
-		sprintf_s( filenameCapLeft, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\Capture\\leftIm%d.jpg",imCnt+1);		//Set file name  and path3
+		sprintf_s( filenameCapLeft, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Cam0StarA%d.jpg",imCnt+1);		//Set file name  and path3
 
 		char filenameCapRight[MAX_PATH] = {0};
-		sprintf_s( filenameCapRight, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\Capture\\rightIm%d.jpg",imCnt+1);		//Set file name  and path3
+		sprintf_s( filenameCapRight, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Cam1StarA%d.jpg",imCnt+1);		//Set file name  and path3
+
+		//cout << "Creating Images" << endl;
 
 		inLeft = cv::imread(filenameCapLeft,CV_LOAD_IMAGE_GRAYSCALE);
 		inRight = cv::imread(filenameCapRight,CV_LOAD_IMAGE_GRAYSCALE);
 
+		undistort(inLeft,imUndistLeft,camMat1,distort1);
+		undistort(inRight,imUndistRight,camMat1,distort1);
+
+		/*namedWindow("Undistort Left");
+		imshow("Undistort Left", imUndistLeft);
+
+		namedWindow("Undistort Right");
+		imshow("Undistort Right", imUndistRight);*/
+
+
+		cout << "Stereo Rectify" << endl;
+
+		Rodrigues(Rk,R);
+
+		cv::stereoRectify(camMat1,distort1,camMat2,distort2,inLeft.Mat::size(),R,Tk,R1,R2,P1,P2,Q,0);
+
+		cout << "Rectification Map" << endl;
+
+		cv::initUndistortRectifyMap(camMat1, distort1, R1, P1, inLeft.Mat::size(), CV_32FC1, cam1Map1, cam1Map2);
+		cv::initUndistortRectifyMap(camMat2, distort2, R2, P2, inRight.Mat::size(), CV_32FC1, cam2Map1, cam2Map2);
+
+		cout << "Remap Images" << endl;
+
+		cv::remap(inLeft,rectLeft,cam1Map1,cam1Map2,cv::INTER_AREA);
+		cv::remap(inRight,rectRight,cam2Map1,cam2Map2,cv::INTER_AREA);
+
+		
+		//inLeft.copyTo(rectLeft);
+		//inRight.copyTo(rectRight);
+		
+		
 		cout << "Find key points" << endl;
 
-		Ptr<FeatureDetector> siftFDLeft = FeatureDetector::create("SIFT");
-		siftFDLeft->detect(inLeft,inLeftKeyPoints);
+		Ptr<FeatureDetector> siftFDLeft = FeatureDetector::create("FAST");
+		siftFDLeft->detect(rectLeft,inLeftKeyPoints);
 		Ptr<DescriptorExtractor> siftDELeft = DescriptorExtractor::create("SIFT");
-		siftDELeft->compute(inLeft,inLeftKeyPoints,inLeftDes);
+		siftDELeft->compute(rectLeft,inLeftKeyPoints,inLeftDes);
 
-		Ptr<FeatureDetector> siftFDRight = FeatureDetector::create("SIFT");
-		siftFDRight->detect(inRight,inRightKeyPoints);
+		Ptr<FeatureDetector> siftFDRight = FeatureDetector::create("FAST");
+		siftFDRight->detect(rectRight,inRightKeyPoints);
 		Ptr<DescriptorExtractor> siftDERight = DescriptorExtractor::create("SIFT");
-		siftDERight->compute(inRight,inRightKeyPoints,inRightDes);
+		siftDERight->compute(rectRight,inRightKeyPoints,inRightDes);
+		
+		BFMatcher matcher(NORM_L2,false);
+		matcher.match(inLeftDes,inRightDes,matches);
 
-		cout << "Draw key points" << endl;
+		vector<Point2f> leftmt;
+		vector<Point2f> rightmt;
 
-		drawKeypoints(inLeft,inLeftKeyPoints,outLeft,Scalar(0, 0, 255),0);
-		namedWindow("Key Points Left");
-		imshow("Key Points Left", outLeft);
-
-		drawKeypoints(inRight,inRightKeyPoints,outRight,Scalar(0, 0, 255),0);
-		namedWindow("Key Points Right");
-		imshow("Key Points Right", outRight);
-
-		////Borrowed Code
-
-		FlannBasedMatcher matcher;
-
-		std::vector<vector<DMatch >> matches;
-		matcher.knnMatch(inLeftDes, inRightDes, matches, 2);
-
-		/*FileStorage fsMatches("matches.yml", FileStorage::WRITE);
-		fsMatches.open("matches.yml", FileStorage::WRITE);
-		if (fsMatches.isOpened())
+		for(int mt = 0;mt < matches.size();mt++)
 		{
-			fsMatches << "Matches" << matches;
-			fsMatches.release();
+			leftmt.push_back(inLeftKeyPoints[matches[mt].queryIdx].pt);
+			rightmt.push_back(inRightKeyPoints[matches[mt].trainIdx].pt);
+
+			if(((inLeftKeyPoints[matches[mt].queryIdx].pt.y - inRightKeyPoints[matches[mt].trainIdx].pt.y) < 5) && ((inLeftKeyPoints[matches[mt].queryIdx].pt.y - inRightKeyPoints[matches[mt].trainIdx].pt.y) > -5))
+			{
+				goodMatches.push_back(matches[mt]);
+
+				points1.push_back(inLeftKeyPoints[matches[mt].queryIdx].pt);
+				points2.push_back(inRightKeyPoints[matches[mt].trainIdx].pt);
+			}
+		}
+
+				
+
+		/*for (int i = 0; i < min(inLeftDes.rows-1,(int) matches.size()); i++) 
+		{
+			if(matches[i,0].distance < (0.8*(matches[i,1].distance)))
+			{
+				goodMatches.push_back(matches[i]);
+			}
 		}*/
 
-		std::cout << "Matches: "<< matches.size() << endl;
+		//matcher.knnMatch(inLeft, inRight, match, 2);
 
-		////
+		/*for(int lt = 0;lt < inLeftKeyPoints.size();lt++)
+		{
+			for(int rt = 0;rt < inRightKeyPoints.size();rt++)
+			{
+				if(inLeftKeyPoints[lt].pt.y == inRightKeyPoints[rt].pt.y||inLeftKeyPoints[lt].pt.y == (inRightKeyPoints[rt].pt.y + 1)||inLeftKeyPoints[lt].pt.y == (inRightKeyPoints[rt].pt.y - 1)||inLeftKeyPoints[lt].pt.y == (inRightKeyPoints[rt].pt.y + 2)||inLeftKeyPoints[lt].pt.y == (inRightKeyPoints[rt].pt.y - 3))
+				{					
+					//FlannBasedMatcher matcher;
 
+					//std::vector<vector<DMatch >> match;
+
+					BFMatcher matcher(NORM_L2,false);
+
+					cout << "Matching" << endl;
+
+					matcher.match(inLeftDes.row(lt),inRightDes.row(rt),match);
+					
+					//matcher.knnMatch(inLeft.row(lt), inRight.row(rt), match, 2);
+
+					if(match.size()>0)
+					{
+						matchCnt ++;
+
+						cout << "Push Back: Key Points" << endl;
+
+						keyLeft.push_back(inLeftKeyPoints[lt]);
+						keyRight.push_back(inRightKeyPoints[rt]);
+
+						cout << "Push Back: Key Point Coordinate" << endl;
+
+						points1.push_back(inLeftKeyPoints[lt].pt);
+						points2.push_back(inRightKeyPoints[rt].pt);
+
+						cout << "Push Back: Descriptors" << endl;
+
+						//desLeft.row(matchCnt) = inLeftDes.row(lt);
+						//desRight.row(matchCnt) = inRightDes.row(rt);
+						
+						cout << "Push Back: Match" << endl;
+
+						matches.push_back(match[0]);
+					}
+				}
+			}
+		}*/
+
+		//cout << "Matches: " << matches.size() << endl;
+		//cout << "Good Matches: " << goodMatches.size() << endl;
+
+		//cout << "Draw" << endl;
+
+		drawMatches(rectLeft,inLeftKeyPoints,rectRight,inRightKeyPoints,matches,outIm1,Scalar(0,255,0),Scalar(0,0,255));
+		drawMatches(rectLeft,inLeftKeyPoints,rectRight,inRightKeyPoints,goodMatches,outIm2,Scalar(0,255,0),Scalar(0,0,255));
+
+		//cout << "Create Windows" << endl;
+
+		namedWindow("Matches");
+		imshow("Matches", outIm1);
+
+		namedWindow("Good Matches");
+		imshow("Good Matches", outIm2);
+
+		cout << "Triangulate" << endl;
+
+		triangulatePoints(P1,P2,points1,points2,Coordhom);
+
+		cout << "Convert from Homogeneous" << endl;
+		
+		int cols = Coordhom.cols;
+		int rows = Coordhom.rows;
+
+		cout << "Rows: " << rows << " / Cols: " << cols << endl;
+
+		vector<vector<double>> Coordnew;
+		vector<vector<double>> Coord3;
+		vector<double> cdn;
+		vector<double> cd3;		
+
+		for(int i = 0;i < rows; i++)
+		{
+			for(int j = 0; j < cols; j++)
+			{
+				cout << "push_back's i: " << i << " / j: " << j << endl;
+
+				cd3.push_back(0.0);
+				cdn.push_back(0.0);
+			}
+
+			if(i < (rows - 1))
+			{
+				Coord3.push_back(cd3);
+			}
+			Coordnew.push_back(cdn);
+
+			cd3.clear();
+			cdn.clear();
+		}
+
+		cout << "Size at 0: " << Coordnew[0].size() << endl;
+		cout << "Size at 1: " << Coordnew[1].size() << endl;
+		cout << "Size at 2: " << Coordnew[2].size() << endl;
+		cout << "Size at 3: " << Coordnew[3].size() << endl;
+		cout << "Size: " << Coordnew.size() << endl;
+
+		cout << "Size at 0: " << Coord3[0].size() << endl;
+		cout << "Size at 1: " << Coord3[1].size() << endl;
+		cout << "Size at 2: " << Coord3[2].size() << endl;
+		cout << "Size: " << Coord3.size() << endl;
+
+		for(int i = 0; i < rows; i++) 
+		{
+			//cout << "Create Mi at " << i << endl;
+
+			double* Mi = Coordhom.ptr<double>(i); 
+
+			for(int j = 0; j < cols; j++)
+			{
+				//cout << "Coordnew at [" << i << "][" << j << "]" << endl;
+
+				Coordnew[i][j] = Mi[j];
+			}
+
+			cout << "Finished with row " << i << endl;
+		}
+
+		cout << "Finished creating vector" << endl;
+
+		for(int kz = 0;kz < cols;kz++)
+		{
+			cout << "Convert" << endl;
+
+			Coord3[0][kz] = ((Coordnew[0][kz]) / (Coordnew[3][kz]))*(0.46);
+			Coord3[1][kz] = ((Coordnew[1][kz]) / (Coordnew[3][kz]))*(0.46);
+			Coord3[2][kz] = ((Coordnew[2][kz]) / (Coordnew[3][kz]))*(0.46);
+		}
+
+		//convertPointsFromHomogeneous(Coordnew,Coord3);
+
+		cout << "Save Triangulated Points" << endl;
+
+		char pointsfile[MAX_PATH] = {0};
+		sprintf_s( pointsfile, "pointsA%d.yml",imCnt+1);		//Set file name  and path3
+		FileStorage fsPoints(pointsfile, FileStorage::WRITE);
+		fsPoints.open(pointsfile, FileStorage::WRITE);
+		if (fsPoints.isOpened())
+		{
+			fsPoints << "Points1" << points1;
+			fsPoints << "Points2" << points2;
+			fsPoints << "Q" << Q;
+			fsPoints << "P1" << P1;
+			fsPoints << "P2" << P2;
+			for(int q = 0; q < Coord3[0].size();q++)
+			{
+				fsPoints << "Point" << q;
+				fsPoints << "Coordinate xh" << Coordnew[0][q];
+				fsPoints << "Coordinate yh" << Coordnew[1][q];
+				fsPoints << "Coordinate zh" << Coordnew[2][q];
+				fsPoints << "Coordinate wh" << Coordnew[3][q];
+
+				fsPoints << "Coordinate x" << Coord3[0][q];
+				fsPoints << "Coordinate y" << Coord3[1][q];
+				fsPoints << "Coordinate z" << Coord3[2][q];
+			}
+			fsPoints.release();
+		}
+
+		
 		imCnt++;
 
 		if(imCnt == 1)
@@ -725,129 +558,10 @@ int _tmain(int argc, _TCHAR* argv[])
 	}
 
 	cout << "Finished feature detection" << endl;
-	/*cout << "Loading image for feature detection" << endl;
-
-	in = cv::imread("C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\2006 Stereo Datasets_files\\view1(5).jpg",CV_LOAD_IMAGE_GRAYSCALE);
-
-	cout << "Find key points" << endl;
-
-	cv::initModule_nonfree();
-
-	cout << "Find key points: feature detector" << endl;
-
-	Ptr<FeatureDetector> siftFD = FeatureDetector::create("SIFT");
-
-	cout << "Find key points: detect" << endl;
-
-	siftFD->detect(in,inKeyPoints);
-
-	cout << "Find key points: descriptor extractor" << endl;
-
-	Ptr<DescriptorExtractor> siftDE = DescriptorExtractor::create("SIFT");
-
-	cout << "Find key points: compute descriptor" << endl;
-
-	siftDE->compute(in,inKeyPoints,inDescrip);
-
-	cout << "Find key points: end" << endl;
-
-	cout << "Draw key points" << endl;
-
-	drawKeypoints(in,inKeyPoints,out,Scalar(0, 0, 255),0);
-
-	cout << "Show key points" << endl;
-
-	namedWindow("Key Points");
-	imshow("Key Points", out);
-
-	cout << "Finished feature detection" << endl;*/
-
-	///////////////////////////////
+	
 
 	while((key = cvWaitKey(0)) != 0x1b);
 
 	return 0;
 }
 
-/*
-/////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////
-/////////////////////////////////////////////////////////////
-
-int main()
-{
-
-	std::cout << "Main"<< endl;
-	std::cout << "Loading images"<< endl;
-
-	for(int y=0;y<numImages;y++)
-	{
-		////Left Image////
-
-		std::cout << "Setting path for left image: "<< y+1 << endl;
-
-		char filename1[MAX_PATH] = {0};
-		sprintf_s( filename1, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\Left%d.jpg",y+1);		//Set file name  and path3
-
-		std::cout << "Loading left image: "<< y+1 << endl;
-
-		tempIm1 = cv::imread(filename1,CV_LOAD_IMAGE_GRAYSCALE);
-
-		std::cout << "Loaded left image: "<< y+1 << endl;
-
-		////Right Image////
-
-		std::cout << "Setting path for right image: "<< y+1 << endl;
-
-		char filename2[MAX_PATH] = {0};
-		sprintf_s( filename2, "C:\\Users\\Bernhard\\Documents\\Skripsie\\Images\\Right%d.jpg",y+1);		//Set file name  and path
-
-		std::cout << "Loading right image: "<< y+1 << endl;
-
-		tempIm2 = cv::imread(filename2,CV_LOAD_IMAGE_GRAYSCALE);
-
-		std::cout << "Loaded right image: "<< y+1 << endl;
-
-		std::cout << "Finished Loading"<< endl;
-
-		std::cout << "Feature Detection and Description"<< endl;
-		
-		cv::initModule_nonfree();
-
-		cout << "Find key points: feature detector" << endl;
-
-		Ptr<FeatureDetector> siftFD = FeatureDetector::create("SIFT");
-
-		cout << "Find key points: descriptor extractor" << endl;
-
-		Ptr<DescriptorExtractor> siftDE = DescriptorExtractor::create("SIFT");
-
-		std::cout << "/tLEFT"<< endl;
-
-			cout << "/tFind key points: detect" << endl;
-
-			siftFD->detect(tempIm1,KeyPointsIm1);
-
-			cout << "/tFind key points: compute descriptor" << endl;
-
-			siftDE->compute(tempIm1,KeyPointsIm1,DescripIm1);
-
-			cout << "/tFind key points: end" << endl;
-
-		std::cout << "/tRIGHT"<< endl;
-
-			cout << "/tFind key points: detect" << endl;
-
-			siftFD->detect(tempIm2,KeyPointsIm2);
-
-			cout << "/tFind key points: compute descriptor" << endl;
-
-			siftDE->compute(tempIm2,KeyPointsIm2,DescripIm2);
-
-			cout << "/tFind key points: end" << endl;
-
-		cout << "Find key points: end" << endl;
-	}
-
-}
-*/
